@@ -4,7 +4,6 @@ from weather_api import get_weather, display_weather
 from jwt_token import generate_qweather_token
 
 API_HOST = "https://your_api_host"
-PRIVATE_KEY_PATH = "ed25519-private.pem"  # 私钥路径
 
 
 def main():
@@ -12,7 +11,7 @@ def main():
 
     # 自动生成Token
     try:
-        token = generate_qweather_token(PRIVATE_KEY_PATH)
+        token = generate_qweather_token()
         print("🔑 已自动生成有效Token")
     except Exception as e:
         print(f"❌ Token生成失败: {str(e)}")

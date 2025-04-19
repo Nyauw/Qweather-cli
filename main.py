@@ -1,9 +1,13 @@
 # main.py
+from dotenv import load_dotenv
+import os
 from geo_api import search_city, display_city_info, select_city
 from weather_api import get_weather, display_weather
 from jwt_token import generate_qweather_token
 
-API_HOST = "https://your_api_host"
+load_dotenv()
+
+API_HOST = os.environ.get("API_HOST")
 
 
 def main():

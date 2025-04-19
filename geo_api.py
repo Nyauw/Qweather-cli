@@ -1,8 +1,10 @@
 # geo_api.py - 城市搜索功能模块
 import requests
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
-
-def search_city(token, keyword, api_host="https://your_api_host", adm=None, number=5):
+def search_city(token, keyword, api_host=os.environ.get("API_HOST"), adm=None, number=5):
     """
     城市搜索API封装
     :param token: API密钥

@@ -1,8 +1,10 @@
 # weather_api.py - 天气查询功能模块
 import requests
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
-
-def get_weather(token, location_id, api_host="https://your_api_host"):
+def get_weather(token, location_id, api_host=os.environ.get("API_HOST")):
     """
     获取实时天气数据
     :param token: API密钥

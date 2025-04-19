@@ -1,7 +1,9 @@
 # jwt_token.py
 import time
 import jwt
-
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
 def generate_qweather_token(private_key_path="ed25519-private.pem"):
     """
@@ -18,12 +20,12 @@ def generate_qweather_token(private_key_path="ed25519-private.pem"):
         payload = {
             'iat': int(time.time()) - 30,  # 补偿时间差
             'exp': int(time.time()) + 300,  # 5分钟有效期
-            'sub': 'your_sub_id'  # 你的账户ID
+            'sub': os.environ.get("SUB")  # 你的账户ID
         }
 
         # 请求头信息
         headers = {
-            'kid': 'your_kid'  # 你的Key ID
+            'kid': os.environ.get("KID")  # 你的Key ID
         }
 
         # 生成Token

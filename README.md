@@ -55,20 +55,8 @@ openssl genpkey -algorithm ED25519 -out ed25519-private.pem \
    ```
 
 4. 修改配置
-（编辑`jwt_token.py`）
-   ```python
-   # jwt_token.py
-   payload = {
-       'sub': 'YOUR_SUB_ID'  # 替换为你的项目ID
-   }
-   headers = {
-       'kid': 'YOUR_KEY_ID'      # 替换为你的凭据 ID
-   }
-   ```
-   (编辑`main.py`)
-   ```python
-   API_HOST = "https://your_api_host"   #替换为你的API Host
-   ```
+（编辑`.env`）
+
 
 ### 使用示例
 

@@ -2,3 +2,8 @@ requests
 PyJWT
 cryptography
 python-dotenv
+python-telegram-bot[job-queue]
+aiofiles
+aiohttp
+python-telegram-bot
+python-dotenv

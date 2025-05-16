@@ -1,9 +1,10 @@
-requests
-PyJWT
-cryptography
-python-dotenv
+requests>=2.28.0
+PyJWT>=2.6.0
+cryptography>=41.0.0
+python-dotenv>=1.0.0
+python-telegram-bot>=20.0
 python-telegram-bot[job-queue]
-aiofiles
-aiohttp
-python-telegram-bot
-python-dotenv
+aiohttp>=3.8.0
+aiofiles>=0.8.0
+folium>=0.14.0  # 用于创建交互式地图
+Pillow>=10.0.0  # 用于图像处理

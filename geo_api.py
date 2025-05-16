@@ -75,6 +75,19 @@ def select_city(cities):
             print("请输入有效数字")
 
 
+def get_selected_city_data(cities, location_id):
+    """
+    获取选中城市的完整数据
+    :param cities: 城市数据列表
+    :param location_id: 选中的城市ID
+    :return: 完整城市数据字典
+    """
+    for city in cities:
+        if city["id"] == location_id:
+            return city
+    return None
+
+
 if __name__ == "__main__":
     # 单独测试城市搜索功能
     TOKEN = "your_token"
@@ -85,3 +98,8 @@ if __name__ == "__main__":
         display_city_info(result)
         city_id = select_city(result)
         print(f"选中的城市ID: {city_id}")
+        
+        # 测试获取完整城市数据
+        if city_id:
+            city_data = get_selected_city_data(result, city_id)
+            print(f"城市经纬度: {city_data.get('lat')}, {city_data.get('lon')}")

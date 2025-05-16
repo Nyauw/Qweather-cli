@@ -8,17 +8,21 @@
 - 🌦️ 实时天气数据获取
 - 🔐 自动JWT Token生成（EdDSA算法）
 - 🗺️ 多级行政区划显示（省/市/）
+- 📍 天气地图可视化（基于folium/Leaflet）
+- 🌡️ 温度热力图生成
 - ⚡ 5分钟Token自动刷新
 
 ## 文件结构
 
 ```
 Qweather-cli/
-├── main.py          # 主程序入口
-├── geo_api.py       # 城市搜索模块
-├── weather_api.py   # 天气查询模块
-├── jwt_token.py     # JWT生成模块
-└── requirements.txt # 依赖列表
+├── main.py                # 主程序入口
+├── geo_api.py             # 城市搜索模块
+├── weather_api.py         # 天气查询模块
+├── jwt_token.py           # JWT生成模块
+├── map_visualization.py   # 地图可视化模块 
+├── weather_assistant_bot.py # 天气机器人模块
+└── requirements.txt       # 依赖列表
 ```
 
 ## 快速开始
@@ -84,6 +88,18 @@ python main.py
 💧 湿度：40%
 👁 能见度：15公里
 📡 数据源：QWeather
+
+是否查看天气地图？(y/n): y
+正在生成天气地图，请稍候...
+地图已生成，正在打开浏览器...
+```
+
+```bash
+# Telegram机器人使用示例
+/start - 开始使用机器人
+/setcity 杭州 - 设置城市
+/weather - 获取当前天气信息
+/map - 获取天气地图可视化
 ```
 
 ## 依赖项

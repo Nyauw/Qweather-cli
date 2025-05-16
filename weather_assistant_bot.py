@@ -4,7 +4,7 @@ import logging
 import aiofiles
 import aiohttp
 from datetime import datetime
-from telegram import Update, Bot
+from telegram import Update, Bot, InputFile
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -16,10 +16,11 @@ from telegram.ext import (
 import asyncio
 import jwt_token
 from weather_api import get_weather
-from geo_api import search_city
+from geo_api import search_city, get_selected_city_data
 from dotenv import load_dotenv
 from telegram.helpers import escape_markdown
 from telegram.error import Forbidden
+import map_visualization
 weather_cache = {}
 load_dotenv()
 # 配置日志
@@ -86,13 +87,13 @@ async def get_grok_ai_response(prompt):
             "messages": [
                 {
                     "role": "system",
-                    "content": "你是一个十分侠客仗义的天气助手，根据天气情况给出穿衣建议和雨伞提醒。回答要啰嗦、毒舌、实用，而且必须得是文言文，语言风格像网络热梗古风小生，比如“快哉快哉，我应在江湖悠悠”。",
+                    "content": "你是一个十分侠客仗义的天气助手，根据天气情况给出穿衣建议和雨伞提醒。回答要啰嗦、毒舌、实用，而且必须得是文言文，语言风格像网络热梗古风小生，比如快哉快哉，我应在江湖悠悠。"
                 },
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": prompt}
             ],
-            "model": "grok-3-mini-latest",
+            "model": "grok-3-mini-beta",
             "stream": False,
-            "temperature": 0.5,
+            "temperature": 0.5
         }
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -228,6 +229,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• /start - 开始使用机器人\n"
             "• /help - 显示帮助信息\n"
             "• /weather - 查看当前天气\n"
+            "• /map - 查看天气地图可视化\n"
             "• /setcity - 设置你的城市\n"
             "• /settimes - 设置提醒时间\n"
             "• /status - 查看当前设置\n"
@@ -240,7 +242,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "机器人会根据天气情况，通过GROK AI智能分析给你提供:\n"
             "• 穿衣建议\n"
             "• 是否需要带伞\n"
-            "• 其他天气注意事项"
+            "• 其他天气注意事项\n\n"
+            "*地图功能:*\n"
+            "使用/map命令可查看天气地图可视化\n"
+            "• 支持直观查看城市地理位置\n"
+            "• 显示当前天气状况"
         ),
         parse_mode="Markdown"  # 保持原有设置
     )
@@ -348,6 +354,65 @@ async def weather_command(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     weather_data, ai_suggestion = await get_city_weather(city_id)
     message = format_telegram_message(weather_data, ai_suggestion, city_name)
     await update.message.reply_text(message, parse_mode="Markdown")
+
+
+async def map_command(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+    """提供地图可视化命令处理函数"""
+    user_id = str(update.effective_user.id)
+
+    if user_id not in user_data or not user_data[user_id].get("city_id"):
+        await update.message.reply_text(
+            "❌ 您尚未设置城市。请使用 /setcity 命令设置您的城市。"
+        )
+        return
+
+    await update.message.reply_text("🗺️ 正在生成天气地图...")
+    
+    try:
+        city_id = user_data[user_id]["city_id"]
+        
+        # 获取完整城市数据（包含经纬度）
+        token = jwt_token.generate_qweather_token()
+        cities = search_city(token, user_data[user_id]["city_name"].split(" ")[0], API_HOST)
+        if not cities:
+            await update.message.reply_text("❌ 获取城市数据失败，请稍后再试。")
+            return
+            
+        city_data = get_selected_city_data(cities, city_id)
+        if not city_data:
+            await update.message.reply_text("❌ 无法获取城市坐标信息。")
+            return
+        
+        # 获取天气数据
+        weather_data, _ = await get_city_weather(city_id)
+        if not weather_data:
+            await update.message.reply_text("❌ 获取天气数据失败，请稍后再试。")
+            return
+            
+        # 生成地图
+        map_file = map_visualization.create_weather_map(city_data, weather_data)
+        
+        # 发送静态地图URL（因为Telegram Bot无法直接发送HTML文件）
+        lat, lon = city_data.get("lat", 0), city_data.get("lon", 0)
+        static_map_url = map_visualization.get_static_map_url(lat, lon)
+        
+        await update.message.reply_text(
+            f"🗺️ *{city_data.get('name', '未知')}* 天气地图:\n\n"
+            f"[点击查看地图]({static_map_url})\n\n"
+            f"🌡️ 温度: {weather_data['now']['temp']}°C\n"
+            f"☁️ 天气: {weather_data['now']['text']}\n",
+            parse_mode="Markdown"
+        )
+        
+        # 告知用户本地地图已生成
+        await update.message.reply_text(
+            "💡 完整交互式地图已在服务器生成，但Telegram无法直接显示。\n"
+            f"地图文件位置: {map_file}"
+        )
+        
+    except Exception as e:
+        logger.error(f"生成地图时出错: {e}")
+        await update.message.reply_text(f"❌ 生成地图时出错: {str(e)}")
 
 
 async def status_command(update: Update, _context: ContextTypes.DEFAULT_TYPE):
@@ -595,6 +660,7 @@ def main():
         CommandHandler("setcity", set_city_command),
         CommandHandler("settimes", set_times_command),
         CommandHandler("weather", weather_command),
+        CommandHandler("map", map_command),
         CommandHandler("status", status_command),
         CommandHandler("stop", stop_command),
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)

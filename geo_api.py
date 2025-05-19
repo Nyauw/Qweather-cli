@@ -88,6 +88,53 @@ def get_selected_city_data(cities, location_id):
     return None
 
 
+def select_multiple_cities(cities):
+    """
+    用户选择多个城市
+    :param cities: 城市数据列表
+    :return: 选择的城市ID列表
+    """
+    selected_ids = []
+    print(f"请选择城市编号(1-{len(cities)})，多个城市用逗号分隔，输入完成后按回车:")
+    print("输入 'a' 选择所有城市，输入 'q' 退出选择")
+    
+    while True:
+        choice = input("你的选择: ").strip().lower()
+        
+        if choice == 'q':
+            return [] if not selected_ids else selected_ids
+        
+        if choice == 'a':
+            return [city["id"] for city in cities]
+        
+        try:
+            # 处理逗号分隔的多个选择
+            selections = [int(num.strip()) for num in choice.split(",")]
+            valid_selections = []
+            
+            for sel in selections:
+                if 1 <= sel <= len(cities):
+                    city_id = cities[sel - 1]["id"]
+                    if city_id not in selected_ids:
+                        selected_ids.append(city_id)
+                        valid_selections.append(sel)
+                else:
+                    print(f"忽略无效选择: {sel}")
+            
+            if valid_selections:
+                city_names = ", ".join([cities[i-1]["name"] for i in valid_selections])
+                print(f"已选择: {city_names}")
+                
+                add_more = input("是否继续添加更多城市? (y/n): ").strip().lower()
+                if add_more != 'y':
+                    return selected_ids
+            else:
+                print("未做有效选择，请重试")
+                
+        except ValueError:
+            print("输入格式错误，请输入数字或用逗号分隔多个数字")
+
+
 if __name__ == "__main__":
     # 单独测试城市搜索功能
     TOKEN = "your_token"

@@ -4,7 +4,7 @@ import logging
 import aiofiles
 import aiohttp
 from datetime import datetime
-from telegram import Update, Bot, InputFile
+from telegram import Update, Bot, InputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -12,6 +12,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
     CallbackContext,
+    CallbackQueryHandler,
 )
 import asyncio
 import jwt_token
@@ -20,7 +21,6 @@ from geo_api import search_city, get_selected_city_data
 from dotenv import load_dotenv
 from telegram.helpers import escape_markdown
 from telegram.error import Forbidden
-import map_visualization
 weather_cache = {}
 load_dotenv()
 # 配置日志
@@ -229,7 +229,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• /start - 开始使用机器人\n"
             "• /help - 显示帮助信息\n"
             "• /weather - 查看当前天气\n"
-            "• /map - 查看天气地图可视化\n"
+            "• /compare - 多城市天气对比\n"
             "• /setcity - 设置你的城市\n"
             "• /settimes - 设置提醒时间\n"
             "• /status - 查看当前设置\n"
@@ -243,10 +243,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• 穿衣建议\n"
             "• 是否需要带伞\n"
             "• 其他天气注意事项\n\n"
-            "*地图功能:*\n"
-            "使用/map命令可查看天气地图可视化\n"
-            "• 支持直观查看城市地理位置\n"
-            "• 显示当前天气状况"
+            "*多城市对比:*\n"
+            "使用/compare命令可以对比多个城市的天气\n"
+            "• 格式: /compare 城市1,城市2,城市3"
         ),
         parse_mode="Markdown"  # 保持原有设置
     )
@@ -354,65 +353,6 @@ async def weather_command(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     weather_data, ai_suggestion = await get_city_weather(city_id)
     message = format_telegram_message(weather_data, ai_suggestion, city_name)
     await update.message.reply_text(message, parse_mode="Markdown")
-
-
-async def map_command(update: Update, _context: ContextTypes.DEFAULT_TYPE):
-    """提供地图可视化命令处理函数"""
-    user_id = str(update.effective_user.id)
-
-    if user_id not in user_data or not user_data[user_id].get("city_id"):
-        await update.message.reply_text(
-            "❌ 您尚未设置城市。请使用 /setcity 命令设置您的城市。"
-        )
-        return
-
-    await update.message.reply_text("🗺️ 正在生成天气地图...")
-    
-    try:
-        city_id = user_data[user_id]["city_id"]
-        
-        # 获取完整城市数据（包含经纬度）
-        token = jwt_token.generate_qweather_token()
-        cities = search_city(token, user_data[user_id]["city_name"].split(" ")[0], API_HOST)
-        if not cities:
-            await update.message.reply_text("❌ 获取城市数据失败，请稍后再试。")
-            return
-            
-        city_data = get_selected_city_data(cities, city_id)
-        if not city_data:
-            await update.message.reply_text("❌ 无法获取城市坐标信息。")
-            return
-        
-        # 获取天气数据
-        weather_data, _ = await get_city_weather(city_id)
-        if not weather_data:
-            await update.message.reply_text("❌ 获取天气数据失败，请稍后再试。")
-            return
-            
-        # 生成地图
-        map_file = map_visualization.create_weather_map(city_data, weather_data)
-        
-        # 发送静态地图URL（因为Telegram Bot无法直接发送HTML文件）
-        lat, lon = city_data.get("lat", 0), city_data.get("lon", 0)
-        static_map_url = map_visualization.get_static_map_url(lat, lon)
-        
-        await update.message.reply_text(
-            f"🗺️ *{city_data.get('name', '未知')}* 天气地图:\n\n"
-            f"[点击查看地图]({static_map_url})\n\n"
-            f"🌡️ 温度: {weather_data['now']['temp']}°C\n"
-            f"☁️ 天气: {weather_data['now']['text']}\n",
-            parse_mode="Markdown"
-        )
-        
-        # 告知用户本地地图已生成
-        await update.message.reply_text(
-            "💡 完整交互式地图已在服务器生成，但Telegram无法直接显示。\n"
-            f"地图文件位置: {map_file}"
-        )
-        
-    except Exception as e:
-        logger.error(f"生成地图时出错: {e}")
-        await update.message.reply_text(f"❌ 生成地图时出错: {str(e)}")
 
 
 async def status_command(update: Update, _context: ContextTypes.DEFAULT_TYPE):
@@ -636,46 +576,125 @@ async def retry_async(func, args=(), kwargs=None, max_retries=3, delay=1):
             await asyncio.sleep(wait)
 
 
+async def compare_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """多城市天气对比命令"""
+    args = context.args
+    
+    if not args or len(args) == 0:
+        await update.message.reply_text(
+            "❌ 请提供要对比的城市名称，用逗号分隔\n"
+            "例如: /compare 北京,上海,广州"
+        )
+        return
+    
+    # 处理逗号分隔的输入
+    if len(args) == 1 and "," in args[0]:
+        city_names = [name.strip() for name in args[0].split(",") if name.strip()]
+    else:
+        city_names = [name.strip() for name in " ".join(args).split(",") if name.strip()]
+    
+    if not city_names:
+        await update.message.reply_text("❌ 无效的城市名称格式")
+        return
+    
+    if len(city_names) > 10:
+        await update.message.reply_text("⚠️ 一次最多比较10个城市，已截取前10个")
+        city_names = city_names[:10]
+    
+    status_message = await update.message.reply_text(f"🔍 正在查询多个城市的天气: {', '.join(city_names)}...")
+    
+    # 存储所有选中的城市数据和天气数据
+    selected_cities = []
+    weather_data_list = []
+    token = jwt_token.generate_qweather_token()
+    
+    # 进度指示器
+    progress = ["⬜️"] * len(city_names)
+    
+    # 逐个处理每个城市
+    for i, city_name in enumerate(city_names):
+        # 更新进度
+        progress[i] = "🔄"
+        await status_message.edit_text(
+            f"🔍 正在查询中...\n{''.join(progress)}\n当前：{city_name}"
+        )
+        
+        cities = search_city(token, city_name, API_HOST)
+        if not cities:
+            progress[i] = "❌"
+            continue
+        
+        # 自动选择第一个匹配的城市
+        city_data = cities[0]
+        selected_cities.append(city_data)
+        
+        # 获取天气数据
+        weather_data, _ = await get_city_weather(city_data["id"])
+        if weather_data:
+            weather_data_list.append(weather_data)
+            progress[i] = "✅"
+        else:
+            progress[i] = "❌"
+    
+    # 更新完成状态
+    await status_message.edit_text(f"查询完成: {''.join(progress)}")
+    
+    # 如果找到了城市，显示结果
+    if selected_cities and weather_data_list:
+        # 构建表格数据
+        rows = []
+        
+        for i, weather_data in enumerate(weather_data_list):
+            if i < len(selected_cities):
+                city = selected_cities[i]
+                now = weather_data["now"]
+                
+                row = [
+                    f"{city['name']}",
+                    f"{now['text']}",
+                    f"{now['temp']}°C",
+                    f"{now['windDir']} {now['windScale']}级",
+                    f"{now['humidity']}%"
+                ]
+                rows.append(row)
+        
+        # 构建消息
+        message = "*📊 多城市天气对比*\n\n"
+        
+        # 添加表格数据
+        table = []
+        for row in rows:
+            table.append(f"*{row[0]}*: {row[1]}, {row[2]}, {row[3]}, 湿度{row[4]}")
+        
+        message += "\n".join(table)
+        message += f"\n\n🕒 观测时间: {escape_markdown(weather_data_list[0]['now']['obsTime'])}"
+        
+        await update.message.reply_text(message, parse_mode="Markdown")
+    else:
+        await update.message.reply_text("❌ 未能找到任何有效城市的天气数据")
+
+
 def main():
-    """同步主函数，初始化并启动机器人"""
-    # 获取当前事件循环
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    # 同步运行初始化的异步任务
-    loop.run_until_complete(load_user_data())
+    """启动机器人"""
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_stop(post_stop).build()
 
-    # 创建 Telegram 应用
-    app = (
-        Application.builder()
-        .token(TELEGRAM_BOT_TOKEN)
-        .post_init(post_init)
-        .post_stop(post_stop)
-        .build()
-    )
-
-    # 添加命令处理器
-    handlers = [
-        CommandHandler("start", start_command),
-        CommandHandler("help", help_command),
-        CommandHandler("setcity", set_city_command),
-        CommandHandler("settimes", set_times_command),
-        CommandHandler("weather", weather_command),
-        CommandHandler("map", map_command),
-        CommandHandler("status", status_command),
-        CommandHandler("stop", stop_command),
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
-    ]
-    for handler in handlers:
-        app.add_handler(handler)
-    # 使用 PTB 内置的 JobQueue 设置定时任务
-    app.job_queue.run_repeating(
-        send_scheduled_weather,  # 直接使用 PTB 的上下文回调
-        interval=60,  # 30 秒间隔
-        first=10  # 5 秒后首次执行
-    )
+    # 注册命令处理器
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("setcity", set_city_command))
+    application.add_handler(CommandHandler("weather", weather_command))
+    application.add_handler(CommandHandler("compare", compare_command))
+    application.add_handler(CommandHandler("settimes", set_times_command))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("stop", stop_command))
+    
+    # 注册消息处理器
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
     # 启动机器人
     logger.info("机器人已启动")
-    app.run_polling()
+    application.run_polling()
+
 async def post_init(app: Application):
     """启动后执行的操作"""
     logger.info("机器人初始化完成")
@@ -683,11 +702,11 @@ async def post_init(app: Application):
         ("start", "开始使用"),
         ("help", "帮助文档"),
         ("weather", "获取天气"),
+        ("compare", "多城市天气对比"),
         ("setcity", "设置城市"),
         ("settimes", "设置提醒时间"),
         ("status", "当前状态"),
-        ("stop", "暂停提醒"),
-        ("test", "测试消息")
+        ("stop", "暂停提醒")
     ])
 
 async def post_stop(_app: Application):

@@ -21,6 +21,7 @@ from geo_api import search_city, get_selected_city_data
 from dotenv import load_dotenv
 from telegram.helpers import escape_markdown
 from telegram.error import Forbidden
+import pytz
 weather_cache = {}
 load_dotenv()
 # 配置日志
@@ -40,6 +41,7 @@ user_data = {}
 
 # 默认定时提醒时间
 DEFAULT_REMINDER_TIMES = ["06:00", "12:00", "16:00"]
+DEFAULT_TIMEZONE = "Asia/Shanghai"  # 默认时区为北京时间
 
 
 async def load_user_data():
@@ -62,6 +64,8 @@ async def load_user_data():
             data["reminder_times"] = DEFAULT_REMINDER_TIMES.copy()
         if "active" not in data:
             data["active"] = True
+        if "timezone" not in data:
+            data["timezone"] = DEFAULT_TIMEZONE
 
 
 async def save_user_data():
@@ -158,14 +162,21 @@ async def expire_cache(cache_key):
 
 
 
-def format_telegram_message(weather_data, ai_suggestion, city_name=None):
+def format_telegram_message(weather_data, ai_suggestion, city_name=None, timezone=DEFAULT_TIMEZONE):
     if not weather_data:
         return "❌ 无法获取天气数据"
 
     now = weather_data["now"]
     msg = []
     safe_city = escape_markdown(str(city_name)) if city_name else None
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+    
+    # 使用指定时区显示时间
+    try:
+        tz = pytz.timezone(timezone)
+        current_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+    
     title = (
         f"🌈 *{safe_city}天气预报* ({escape_markdown(current_time)})"
         if safe_city
@@ -205,6 +216,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "city_name": None,
             "active": True,
             "reminder_times": DEFAULT_REMINDER_TIMES.copy(),
+            "timezone": DEFAULT_TIMEZONE,  # 添加默认时区
         }
     else:
         user_data[user_id]["active"] = True  # 始终启用提醒
@@ -263,6 +275,7 @@ async def set_city_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "city_name": None,
             "active": True,
             "reminder_times": DEFAULT_REMINDER_TIMES.copy(),
+            "timezone": DEFAULT_TIMEZONE,  # 添加默认时区
         }
 
     if not args:
@@ -323,6 +336,7 @@ async def set_times_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "city_name": None,
             "active": True,
             "reminder_times": DEFAULT_REMINDER_TIMES.copy(),
+            "timezone": DEFAULT_TIMEZONE,  # 添加默认时区
         }
 
     current_times = ", ".join(user_data[user_id]["reminder_times"])
@@ -349,9 +363,10 @@ async def weather_command(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 正在获取天气数据...")
     city_id = user_data[user_id]["city_id"]
     city_name = user_data[user_id]["city_name"]
+    timezone = user_data[user_id].get("timezone", DEFAULT_TIMEZONE)
 
     weather_data, ai_suggestion = await get_city_weather(city_id)
-    message = format_telegram_message(weather_data, ai_suggestion, city_name)
+    message = format_telegram_message(weather_data, ai_suggestion, city_name, timezone)
     await update.message.reply_text(message, parse_mode="Markdown")
 
 
@@ -391,6 +406,7 @@ async def stop_command(update: Update, _context: ContextTypes.DEFAULT_TYPE):
             "city_name": None,
             "active": False,
             "reminder_times": DEFAULT_REMINDER_TIMES.copy(),
+            "timezone": DEFAULT_TIMEZONE,  # 添加默认时区
         }
     else:
         user_data[user_id]["active"] = False
@@ -487,9 +503,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_scheduled_weather(context: CallbackContext):
     """优化的定时天气推送"""
     try:
-        now = datetime.now().astimezone()
-        current_time = now.strftime("%H:%M")
-        logger.debug(f"开始执行定时任务，当前系统时间: {current_time}")
+        # 获取UTC时间
+        utc_now = datetime.now(pytz.UTC)
+        logger.debug(f"开始执行定时任务，当前UTC时间: {utc_now}")
 
         # 使用深拷贝避免数据修改冲突
         users = user_data.copy().items()
@@ -497,7 +513,7 @@ async def send_scheduled_weather(context: CallbackContext):
         # 批量处理用户
         tasks = []
         for user_id, data in users:
-            if validate_user(data, current_time):
+            if validate_user_timezone(data, utc_now):
                 tasks.append(
                     send_user_weather(
                         context.bot,
@@ -516,14 +532,27 @@ async def send_scheduled_weather(context: CallbackContext):
         logger.error(f"定时任务执行失败: {str(e)}", exc_info=True)
 
 
-def validate_user(data: dict, current_time: str) -> bool:
-    """用户验证逻辑"""
-    return (
+def validate_user_timezone(data: dict, utc_now: datetime) -> bool:
+    """基于时区的用户验证逻辑"""
+    try:
+        # 获取用户时区
+        timezone = data.get("timezone", DEFAULT_TIMEZONE)
+        tz = pytz.timezone(timezone)
+        
+        # 将UTC时间转换为用户时区
+        user_time = utc_now.astimezone(tz)
+        current_time = user_time.strftime("%H:%M")
+        
+        # 验证用户是否活跃、是否设置了城市、当前时间是否在提醒时间列表中
+        return (
             data.get("active", True) and
             data.get("city_id") and
             current_time in data.get("reminder_times", []) and
             data.get("city_name")
-    )
+        )
+    except Exception as e:
+        logger.error(f"验证用户时区时出错: {e}")
+        return False
 
 
 async def send_user_weather(bot: Bot, user_id: str, city_id: str, city_name: str):
@@ -535,9 +564,12 @@ async def send_user_weather(bot: Bot, user_id: str, city_id: str, city_name: str
             logger.warning(f"城市 {city_name}({city_id}) 天气数据为空")
             return
 
+        # 获取用户时区
+        timezone = user_data[user_id].get("timezone", DEFAULT_TIMEZONE)
+        
         # 构建安全的消息内容
         safe_city_name = escape_markdown(city_name)
-        message = format_telegram_message(weather_data, ai_suggestion, safe_city_name)
+        message = format_telegram_message(weather_data, ai_suggestion, safe_city_name, timezone)
 
         # 发送消息（带重试机制）
         await retry_async(
@@ -674,6 +706,66 @@ async def compare_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ 未能找到任何有效城市的天气数据")
 
 
+async def set_timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """设置用户时区"""
+    user_id = str(update.effective_user.id)
+    
+    if user_id not in user_data:
+        user_data[user_id] = {
+            "city_id": None,
+            "city_name": None,
+            "active": True,
+            "reminder_times": DEFAULT_REMINDER_TIMES.copy(),
+            "timezone": DEFAULT_TIMEZONE,
+        }
+    
+    args = get_args(context)
+    if not args:
+        # 显示当前时区
+        current_timezone = user_data[user_id].get("timezone", DEFAULT_TIMEZONE)
+        await update.message.reply_text(
+            f"*当前时区设置*\n\n"
+            f"🌍 时区: {current_timezone}\n\n"
+            f"要更改时区，请使用以下格式：\n"
+            f"`/settimezone 时区名称`\n\n"
+            f"常用时区示例：\n"
+            f"• Asia/Shanghai (北京时间)\n"
+            f"• Asia/Tokyo (东京时间)\n"
+            f"• America/New_York (纽约时间)\n"
+            f"• Europe/London (伦敦时间)\n"
+            f"• Australia/Sydney (悉尼时间)\n\n"
+            f"您可以在 https://en.wikipedia.org/wiki/List_of_tz_database_time_zones 查看完整的时区列表",
+            parse_mode="Markdown"
+        )
+        return
+    
+    new_timezone = " ".join(args)
+    try:
+        # 验证时区是否有效
+        pytz.timezone(new_timezone)
+        
+        # 更新用户时区
+        user_data[user_id]["timezone"] = new_timezone
+        await save_user_data()
+        
+        # 获取新时区的当前时间
+        tz = pytz.timezone(new_timezone)
+        current_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+        
+        await update.message.reply_text(
+            f"✅ 时区已更新为: {new_timezone}\n"
+            f"当前时间: {current_time}"
+        )
+    except pytz.exceptions.UnknownTimeZoneError:
+        await update.message.reply_text(
+            "❌ 无效的时区名称\n"
+            "请使用正确的时区名称，例如：Asia/Shanghai"
+        )
+    except Exception as e:
+        logger.error(f"设置时区时出错: {e}")
+        await update.message.reply_text("❌ 设置时区时发生错误，请稍后重试")
+
+
 def main():
     """启动机器人"""
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_stop(post_stop).build()
@@ -687,6 +779,7 @@ def main():
     application.add_handler(CommandHandler("settimes", set_times_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("stop", stop_command))
+    application.add_handler(CommandHandler("settimezone", set_timezone_command))
     
     # 注册消息处理器
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -706,7 +799,8 @@ async def post_init(app: Application):
         ("setcity", "设置城市"),
         ("settimes", "设置提醒时间"),
         ("status", "当前状态"),
-        ("stop", "暂停提醒")
+        ("stop", "暂停提醒"),
+        ("settimezone", "设置时区")
     ])
 
 async def post_stop(_app: Application):

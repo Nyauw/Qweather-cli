@@ -16,12 +16,14 @@ from telegram.ext import (
 )
 import asyncio
 import jwt_token
-from weather_api import get_weather
+from weather_api import get_weather, get_weather_warning
 from geo_api import search_city, get_selected_city_data
 from dotenv import load_dotenv
 from telegram.helpers import escape_markdown
 from telegram.error import Forbidden
 import pytz
+from telegram.request import HTTPXRequest
+import httpx
 weather_cache = {}
 load_dotenv()
 # 配置日志
@@ -216,10 +218,17 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "city_name": None,
             "active": True,
             "reminder_times": DEFAULT_REMINDER_TIMES.copy(),
-            "timezone": DEFAULT_TIMEZONE,  # 添加默认时区
+            "timezone": DEFAULT_TIMEZONE,
+            "warning_cities": [],
+            "notified_warnings": []
         }
     else:
-        user_data[user_id]["active"] = True  # 始终启用提醒
+        user_data[user_id]["active"] = True
+        if "warning_cities" not in user_data[user_id]:
+            user_data[user_id]["warning_cities"] = []
+        if "notified_warnings" not in user_data[user_id]:
+            user_data[user_id]["notified_warnings"] = []
+            
     await save_user_data()
     # 使用 context.bot 发送消息
     await context.bot.send_message(
@@ -238,28 +247,26 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text=(
             "*🌈 天气机器人使用帮助*\n\n"
             "*基本命令:*\n"
-            "• /start - 开始使用机器人\n"
-            "• /help - 显示帮助信息\n"
-            "• /weather - 查看当前天气\n"
-            "• /compare - 多城市天气对比\n"
-            "• /setcity - 设置你的城市\n"
-            "• /settimes - 设置提醒时间\n"
-            "• /status - 查看当前设置\n"
-            "• /stop - 暂停天气提醒\n"
-            "• /start - 重新开启天气提醒\n\n"
+            "• /start \\- 开始使用机器人\n"
+            "• /help \\- 显示帮助信息\n"
+            "• /weather \\- 查看当前天气\n"
+            "• /compare \\- 多城市天气对比\n"
+            "• /setcity \\- 设置你的默认城市（用于天气提醒）\n"
+            "• /settimes \\- 设置提醒时间\n"
+            "• /status \\- 查看当前设置\n"
+            "• /stop \\- 暂停天气提醒\n\n"
+            "*灾害预警订阅:*\n"
+            "• /add\\_warning\\_city `城市名` \\- 订阅一个城市的天气灾害预警\n"
+            "• /del\\_warning\\_city \\- 管理（删除）已订阅的预警城市\n"
+            "• /list\\_warning\\_cities \\- 查看已订阅的预警城市列表\n\n"
             "*关于提醒时间:*\n"
             "默认在每天06:00、12:00和16:00发送天气提醒\n"
-            "使用/settimes命令可以自定义时间\n\n"
-            "*智能提醒:*\n"
-            "机器人会根据天气情况，通过GROK AI智能分析给你提供:\n"
-            "• 穿衣建议\n"
-            "• 是否需要带伞\n"
-            "• 其他天气注意事项\n\n"
-            "*多城市对比:*\n"
-            "使用/compare命令可以对比多个城市的天气\n"
+            "使用 /settimes `HH:MM HH:MM` 格式设置，最多3个时间\n"
+            "例如: `/settimes 07:00 19:00`\n\n"
+            "*关于多城市对比:*\n"
             "• 格式: /compare 城市1,城市2,城市3"
         ),
-        parse_mode="Markdown"  # 保持原有设置
+        parse_mode="MarkdownV2",
     )
 
 def get_args(context):
@@ -766,47 +773,320 @@ async def set_timezone_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("❌ 设置时区时发生错误，请稍后重试")
 
 
-def main():
-    """启动机器人"""
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_stop(post_stop).build()
+async def add_warning_city_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """添加一个新的天气预警订阅城市"""
+    user_id = str(update.effective_user.id)
+    if not context.args:
+        await update.message.reply_text("请提供一个城市名称，例如：`/add_warning_city 北京`")
+        return
 
-    # 注册命令处理器
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("setcity", set_city_command))
-    application.add_handler(CommandHandler("weather", weather_command))
-    application.add_handler(CommandHandler("compare", compare_command))
-    application.add_handler(CommandHandler("settimes", set_times_command))
-    application.add_handler(CommandHandler("status", status_command))
-    application.add_handler(CommandHandler("stop", stop_command))
-    application.add_handler(CommandHandler("settimezone", set_timezone_command))
+    city_name = " ".join(context.args)
+    token = jwt_token.generate_qweather_token()
+    cities = search_city(token, city_name, API_HOST)
+
+    if not cities:
+        await update.message.reply_text(f"❌ 找不到城市：{escape_markdown(city_name, version=2)}")
+        return
+
+    # 使用第一个匹配结果
+    selected_city_info = cities[0]
+    city_id = selected_city_info["id"]
+    full_city_name = f"{selected_city_info['name']} ({selected_city_info['adm1']})"
+
+    if user_id not in user_data:
+        # Should be created by /start, but as a safeguard
+        user_data[user_id] = {
+            "warning_cities": [],
+            "notified_warnings": []
+        }
     
-    # 注册消息处理器
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # 初始化预警相关字段
+    if "warning_cities" not in user_data[user_id]:
+        user_data[user_id]["warning_cities"] = []
+    if "notified_warnings" not in user_data[user_id]:
+        user_data[user_id]["notified_warnings"] = []
+
+    # 检查是否已订阅
+    if any(sub["id"] == city_id for sub in user_data[user_id]["warning_cities"]):
+        await update.message.reply_text(f"✅ 您已订阅 {escape_markdown(full_city_name, version=2)} 的预警。")
+        return
+            
+    # 添加到订阅列表
+    city_to_add = {"id": city_id, "name": selected_city_info["name"], "adm1": selected_city_info['adm1']}
+    user_data[user_id]["warning_cities"].append(city_to_add)
+    await save_user_data()
     
-    # 启动机器人
-    logger.info("机器人已启动")
-    application.run_polling()
+    await update.message.reply_text(f"✅ 成功订阅 {escape_markdown(full_city_name, version=2)} 的天气灾害预警！", parse_mode="MarkdownV2")
+    # 立即检查一次
+    await check_and_send_warning_for_city(context.bot, user_id, city_to_add)
+
+
+async def list_warning_cities_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """列出用户订阅的预警城市"""
+    user_id = str(update.effective_user.id)
+    if user_id not in user_data or not user_data[user_id].get("warning_cities"):
+        await update.message.reply_text("您尚未订阅任何城市的天气预警。\n使用 `/add_warning_city <城市名>` 添加。")
+        return
+        
+    cities_list = user_data[user_id]["warning_cities"]
+    if not cities_list:
+        await update.message.reply_text("您尚未订阅任何城市的天气预警。\n使用 `/add_warning_city <城市名>` 添加。")
+        return
+
+    message_lines = ["*您已订阅以下城市的天气预警：*"]
+    for city in cities_list:
+        city_name = escape_markdown(f"{city['name']} ({city.get('adm1', '')})", version=2)
+        message_lines.append(f"\\- {city_name}")
+        
+    await update.message.reply_text("\n".join(message_lines), parse_mode="MarkdownV2")
+
+
+async def del_warning_city_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """显示一个带删除按钮的已订阅城市列表"""
+    user_id = str(update.effective_user.id)
+    if user_id not in user_data or not user_data[user_id].get("warning_cities"):
+        await update.message.reply_text("您尚未订阅任何城市的天气预警。")
+        return
+
+    cities_list = user_data[user_id]["warning_cities"]
+    if not cities_list:
+        await update.message.reply_text("您尚未订阅任何城市的天气预警。")
+        return
+
+    keyboard = []
+    for city in cities_list:
+        callback_data = f"delwarn_{city['id']}"
+        button_text = f"❌ 删除 {city['name']}"
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text('请选择要删除的预警城市:', reply_markup=reply_markup)
+
+
+async def warning_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理删除预警城市的回调"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = str(query.from_user.id)
+    callback_data = query.data
+    
+    if callback_data.startswith("delwarn_"):
+        city_id_to_del = callback_data.split("_")[1]
+        
+        if user_id in user_data and "warning_cities" in user_data[user_id]:
+            cities = user_data[user_id]["warning_cities"]
+            city_to_remove = next((c for c in cities if c["id"] == city_id_to_del), None)
+            
+            if city_to_remove:
+                removed_city_name = escape_markdown(city_to_remove['name'], version=2)
+                cities.remove(city_to_remove)
+                await save_user_data()
+                await query.edit_message_text(text=f"已取消对 {removed_city_name} 的预警订阅。")
+            else:
+                await query.edit_message_text(text="未找到该订阅，可能已被删除。")
+        else:
+            await query.edit_message_text(text="出现错误，找不到您的订阅数据。")
+
+
+def format_warning_message(warning, city_name):
+    """格式化预警信息用于Telegram发送"""
+    title = escape_markdown(warning.get('title', '天气预警'), version=2)
+    sender = escape_markdown(warning.get('sender', '未知来源'), version=2)
+    pub_time_str = warning.get('pubTime', '')
+    if pub_time_str:
+        # 格式化时间
+        dt_object = datetime.fromisoformat(pub_time_str)
+        pub_time = escape_markdown(dt_object.strftime("%Y-%m-%d %H:%M"), version=2)
+    else:
+        pub_time = "N/A"
+
+    text = escape_markdown(warning.get('text', '无详细信息'), version=2)
+    type_name = escape_markdown(warning.get('typeName', 'N/A'), version=2)
+    severity = escape_markdown(warning.get('severity', 'N/A'), version=2)
+    city_name_escaped = escape_markdown(city_name, version=2)
+
+    return (
+        f"‼️ *{city_name_escaped} 天气灾害预警* ‼️\n\n"
+        f"*{title}*\n\n"
+        f"*类型*: {type_name}\n"
+        f"*级别*: {severity}\n"
+        f"*发布单位*: {sender}\n"
+        f"*发布时间*: {pub_time}\n\n"
+        f"*详情*:\n{text}"
+    )
+
+async def check_and_send_warning_for_city(bot: Bot, user_id, city):
+    """为单个用户和城市检查并发送预警"""
+    token = jwt_token.generate_qweather_token()
+    if not token:
+        logger.error("无法为预警检查生成Token")
+        return
+
+    warning_data = get_weather_warning(token, city["id"])
+    if not warning_data or not warning_data.get("warning"):
+        return
+
+    if user_id not in user_data or "notified_warnings" not in user_data[user_id]:
+        user_data[user_id]["notified_warnings"] = []
+
+    for warning in warning_data["warning"]:
+        warning_id = warning["id"]
+        if warning_id not in user_data[user_id]["notified_warnings"]:
+            try:
+                message = format_warning_message(warning, city["name"])
+                await bot.send_message(chat_id=user_id, text=message, parse_mode="MarkdownV2")
+                
+                user_data[user_id]["notified_warnings"].append(warning_id)
+                
+                if len(user_data[user_id]["notified_warnings"]) > 50:
+                    user_data[user_id]["notified_warnings"] = user_data[user_id]["notified_warnings"][-25:]
+                
+                await save_user_data()
+                
+            except Forbidden:
+                await deactivate_user(user_id)
+                logger.warning(f"用户 {user_id} 已屏蔽机器人，已将其停用。")
+                break
+            except Exception as e:
+                logger.error(f"发送预警消息给 {user_id} 时出错: {e}")
+
+async def check_weather_warnings(context: CallbackContext):
+    """后台定时任务：检查所有用户的预警订阅"""
+    logger.info("后台任务：开始检查天气灾害预警...")
+    all_cities_to_check = {}
+    for user_id, data in user_data.items():
+        if data.get("active") and data.get("warning_cities"):
+            for city in data["warning_cities"]:
+                if city["id"] not in all_cities_to_check:
+                    all_cities_to_check[city["id"]] = city
+    
+    if not all_cities_to_check:
+        logger.info("后台任务：没有需要检查的预警城市。")
+        return
+
+    token = jwt_token.generate_qweather_token()
+    if not token:
+        logger.error("无法为后台预警任务生成Token")
+        return
+
+    all_warnings_found = {} # {city_id: [warnings]}
+    for city_id, city_info in all_cities_to_check.items():
+        try:
+            warning_data = get_weather_warning(token, city_id)
+            if warning_data and warning_data.get("warning"):
+                all_warnings_found[city_id] = warning_data["warning"]
+            await asyncio.sleep(1)
+        except Exception as e:
+            logger.error(f"检查城市 {city_info['name']} ({city_id}) 预警时出错: {e}")
+
+    if not all_warnings_found:
+        return
+        
+    for user_id, data in user_data.items():
+        if not data.get("active") or not data.get("warning_cities"):
+            continue
+
+        if "notified_warnings" not in data:
+            data["notified_warnings"] = []
+            
+        for subscribed_city in data["warning_cities"]:
+            city_id = subscribed_city["id"]
+            if city_id in all_warnings_found:
+                for warning in all_warnings_found[city_id]:
+                    if warning["id"] not in data["notified_warnings"]:
+                        try:
+                            message = format_warning_message(warning, subscribed_city["name"])
+                            await context.bot.send_message(chat_id=user_id, text=message, parse_mode="MarkdownV2")
+                            data["notified_warnings"].append(warning["id"])
+                            if len(data["notified_warnings"]) > 50:
+                                data["notified_warnings"] = data["notified_warnings"][-25:]
+                        except Forbidden:
+                            await deactivate_user(user_id)
+                            logger.warning(f"用户 {user_id} 已屏蔽机器人，已将其停用。")
+                            break
+                        except Exception as e:
+                            logger.error(f"分发预警给 {user_id} 时出错: {e}")
+                if not data.get("active"): # Check again in case user was deactivated
+                    break
+            
+    await save_user_data()
+    logger.info("后台任务：天气灾害预警检查完成。")
 
 async def post_init(app: Application):
-    """启动后执行的操作"""
-    logger.info("机器人初始化完成")
+    """在机器人启动后加载用户数据并设置命令列表"""
+    await load_user_data()
     await app.bot.set_my_commands([
-        ("start", "开始使用"),
-        ("help", "帮助文档"),
-        ("weather", "获取天气"),
-        ("compare", "多城市天气对比"),
+        ("help", "显示帮助"),
+        ("weather", "查询天气"),
         ("setcity", "设置城市"),
         ("settimes", "设置提醒时间"),
+        ("compare", "多城市天气对比"),
         ("status", "当前状态"),
         ("stop", "暂停提醒"),
-        ("settimezone", "设置时区")
+        ("set_timezone", "设置时区")
     ])
 
-async def post_stop(_app: Application):
-    """停止前执行的操作"""
+async def post_stop(app: Application):
+    """在机器人停止前保存用户数据"""
     logger.info("机器人正在关闭...")
     await save_user_data()
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """记录更新引起的错误"""
+    logger.error("处理更新时发生异常:", exc_info=context.error)
+
+def main():
+    """启动机器人"""
+    if not TELEGRAM_BOT_TOKEN:
+        logger.critical("未设置TELEGRAM_BOT_TOKEN，机器人无法启动")
+        return
+
+    app = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_stop)
+        .build()
+    )
+
+    # 注册错误处理器
+    app.add_error_handler(error_handler)
+
+    # Command handlers
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("weather", weather_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("stop", stop_command))
+    app.add_handler(CommandHandler("setcity", set_city_command))
+    app.add_handler(CommandHandler("settimes", set_times_command))
+    app.add_handler(CommandHandler("compare", compare_command))
+    app.add_handler(CommandHandler("set_timezone", set_timezone_command))
+
+    # Add weather warning handlers
+    app.add_handler(CommandHandler("add_warning_city", add_warning_city_command))
+    app.add_handler(CommandHandler("list_warning_cities", list_warning_cities_command))
+    app.add_handler(CommandHandler("del_warning_city", del_warning_city_command))
+    app.add_handler(CallbackQueryHandler(warning_callback_handler, pattern="^delwarn_"))
+
+
+    # Message handler
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # 定时任务
+    job_queue = app.job_queue
+    job_queue.run_daily(
+        send_scheduled_weather,
+        time=datetime.strptime("00:00", "%H:%M").time(),
+        name="daily_weather_check",
+    )
+    job_queue.run_repeating(check_weather_warnings, interval=1800, first=10, name="warning_check")
+
+
+    # 启动机器人
+    logger.info("机器人正在启动...")
+    app.run_polling()
 
 
 if __name__ == "__main__":

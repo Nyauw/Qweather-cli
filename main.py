@@ -2,7 +2,7 @@
 from dotenv import load_dotenv
 import os
 from geo_api import search_city, display_city_info, select_city, get_selected_city_data, select_multiple_cities
-from weather_api import get_weather, display_weather, display_multiple_weather
+from weather_api import get_weather, display_weather, display_multiple_weather, get_weather_warning, display_weather_warning, display_multiple_weather_warnings
 from jwt_token import generate_qweather_token
 import map_visualization
 
@@ -27,9 +27,10 @@ def main():
         print("\n选择查询模式:")
         print("1. 单城市查询")
         print("2. 多城市查询")
+        print("3. 天气灾害预警查询")
         print("q. 退出程序")
         
-        mode = input("请选择功能 (1/2/q): ").strip().lower()
+        mode = input("请选择功能 (1/2/3/q): ").strip().lower()
         
         if mode == 'q':
             break
@@ -37,6 +38,8 @@ def main():
             single_city_query(token)
         elif mode == '2':
             multiple_cities_query(token)
+        elif mode == '3':
+            warning_query(token)
         else:
             print("❌ 无效选择，请重新输入")
 
@@ -83,6 +86,63 @@ def single_city_query(token):
                 lat, lon = city_data.get("lat", 0), city_data.get("lon", 0)
                 static_map_url = map_visualization.get_static_map_url(lat, lon)
                 print(f"您可以通过访问以下链接查看静态地图:\n{static_map_url}")
+
+
+def warning_query(token):
+    """天气灾害预警查询"""
+    # 用户输入
+    keywords = input("\n🏙 请输入一个或多个城市名称，用逗号分隔 (b返回): ").strip()
+    if keywords.lower() == "b":
+        return
+    
+    city_names = [name.strip() for name in keywords.split(",") if name.strip()]
+    if not city_names:
+        print("❌ 未输入有效城市名称")
+        return
+
+    selected_cities = []
+    warning_data_list = []
+
+    # 处理每个输入的城市名称
+    for i, city_name in enumerate(city_names):
+        print(f"\n🔍 正在搜索城市: {city_name} ({i+1}/{len(city_names)})")
+        cities = search_city(token, city_name, API_HOST)
+        
+        if not cities:
+            print(f"❌ 未找到城市: {city_name}")
+            continue
+        
+        # 如果只找到一个城市，直接选择
+        if len(cities) == 1:
+            city_data = cities[0]
+            print(f"✅ 自动选择唯一匹配城市: {city_data['name']} ({city_data['adm1']})")
+        else:
+            # 找到多个城市，让用户选择
+            display_city_info(cities)
+            location_id = select_city(cities)
+            if not location_id:
+                continue
+            city_data = get_selected_city_data(cities, location_id)
+
+        if city_data:
+            selected_cities.append(city_data)
+            # 获取天气预警数据
+            print(f"📜 正在获取 {city_data['name']} 的天气灾害预警...")
+            warning_data = get_weather_warning(token, city_data["id"])
+            if warning_data:
+                warning_data_list.append(warning_data)
+            else:
+                print(f"❌ 获取 {city_data['name']} 的天气灾害预警失败")
+
+    # 根据查询的城市数量，选择不同的显示方式
+    if not selected_cities:
+        print("❌ 未选择任何城市，无法查询预警")
+        return
+
+    if len(selected_cities) == 1:
+        display_weather_warning(warning_data_list[0], selected_cities[0])
+    else:
+        display_multiple_weather_warnings(warning_data_list, selected_cities)
 
 
 def multiple_cities_query(token):
